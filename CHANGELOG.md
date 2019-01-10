@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ### Added
 
 -   `idoit-install`: Add experimental support for Debian GNU/Linux 10 "buster"
+-   `idoit-install`: Add experimental support for Red Hat Enterprise Linux (RHEL) 8
 -   `idoit-install`: Add experimental support for PHP 7.3 and 7.4
 
 

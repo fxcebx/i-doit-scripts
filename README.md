@@ -25,6 +25,7 @@ on a **fresh installation of a GNU/Linux operating system**. Supported OSs are:
 -   Ubuntu Linux 16.04 LTS "xenial"
 -   Ubuntu Linux 18.04 LTS "bionic"
 -   Red Hat Enterprise Linux (RHEL) 7
+-   Red Hat Enterprise Linux (RHEL) 8 (**for testing purposes only**)
 -   CentOS 7
 -   SUSE Linux Enterprise Server 12 SP2/SP3/SP4 and 15
 

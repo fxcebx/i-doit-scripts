@@ -265,7 +265,7 @@ function identifyOS {
         MEMCACHED_UNIT="memcached"
         PHP_FPM_UNIT="php-fpm"
     elif [[ "$PRETTY_NAME" == "Debian GNU/Linux buster/sid" ]]; then
-        log "Warning: This is an unstable version of Debian GNU/Linux"
+        log "Warning: This is an unstable version of $NAME"
         askYesNo "Do you really want to continue?" || cancel
 
         OS="debian10"
@@ -294,7 +294,7 @@ function identifyOS {
         MEMCACHED_UNIT="memcached"
         PHP_FPM_UNIT="php7.0-fpm"
     elif [[ "$NAME" == "Debian GNU/Linux" && "$VERSION" == "8 (jessie)" ]]; then
-        log "Warning: This is an older version of Debian GNU/Linux"
+        log "Warning: This is an older version of $NAME"
         askYesNo "Do you really want to continue?" || cancel
 
         OS="debian8"
@@ -309,6 +309,22 @@ function identifyOS {
         MARIADB_UNIT="mysql"
         MEMCACHED_UNIT="memcached"
         PHP_FPM_UNIT=""
+    elif [[ "$NAME" == "Red Hat Enterprise Linux" && "$VERSION_ID" == 8* ]]; then
+        log "Warning: This is a beta version of $NAME"
+        askYesNo "Do you really want to continue?" || cancel
+
+        OS="rhel8"
+        APACHE_USER="apache"
+        APACHE_GROUP="apache"
+        APACHE_CONFIG_FILE="/etc/httpd/conf.d/i-doit.conf"
+        MARIADB_CONFIG_FILE="/etc/my.cnf.d/99-i-doit.cnf"
+        PHP_CONFIG_FILE="/etc/php.d/i-doit.ini"
+        MARIADB_SOCKET="/var/lib/mysql/mysql.sock"
+        PHP_FPM_SOCKET="/var/run/php-fpm/php-fpm.sock"
+        APACHE_UNIT="httpd"
+        MARIADB_UNIT="mariadb"
+        MEMCACHED_UNIT="memcached"
+        PHP_FPM_UNIT="php-fpm"
     elif [[ "$NAME" == "Red Hat Enterprise Linux Server" && "$VERSION_ID" == 7* ]]; then
         OS="rhel7"
         APACHE_USER="apache"
@@ -385,7 +401,7 @@ function identifyOS {
         MEMCACHED_UNIT="memcached"
         PHP_FPM_UNIT="php7.0-fpm"
     else
-        abort "Operating system ${PRETTY_NAME} is not supported"
+        abort "This operating system is not supported"
     fi
 }
 
@@ -448,15 +464,23 @@ function checkRequirements {
     binaries["wget"]="$WGET_BIN"
     binaries["php"]="$PHP_BIN"
     binaries["systemctl"]=$(command -v systemctl)
-    binaries["chronic"]=$(command -v chronic)
     binaries["memcached"]=$(command -v memcached)
 
     case "$OS" in
-        "rhel7"|"centos7")
+        "rhel7"|"rhel8"|"centos7")
             binaries["httpd"]=$(command -v httpd)
             ;;
         *)
             binaries["apachectl"]=$(command -v apachectl)
+            ;;
+    esac
+
+    ## TODO chronic is missing on RHEL 8!
+    case "$OS" in
+        "rhel8")
+            ;;
+        *)
+            binaries["chronic"]=$(command -v chronic)
             ;;
     esac
 
@@ -472,14 +496,24 @@ function checkRequirements {
     if [[ -x "$PHP_BIN" ]]; then
         log "Check for installed PHP extensions…"
 
-        ## TODO Failed to install php7-imagick on SLES 15:
-        if [[ "$OS" = "sles15" ]]; then
-            local phpExtensions=(bcmath ctype curl fileinfo gd json ldap \
-                mbstring memcached mysqli mysqlnd pgsql session soap xml zip)
-        else
-            local phpExtensions=(bcmath ctype curl fileinfo gd imagick json ldap \
-                mbstring memcached mysqli mysqlnd pgsql session soap xml zip)
-        fi
+        case "$OS" in
+            "sles15")
+                ## TODO Failed to install php7-imagick on SLES 15:
+                local phpExtensions=(bcmath ctype curl fileinfo gd json ldap \
+                    mbstring memcached mysqli mysqlnd pgsql session soap xml \
+                    zip)
+                ;;
+            "rhel8")
+                ## TODO Failed to install php-imagick, php-memcached on RHEL 8:
+                local phpExtensions=(bcmath ctype curl fileinfo gd json ldap \
+                    mbstring mysqli mysqlnd pgsql session soap xml zip)
+                ;;
+            *)
+                local phpExtensions=(bcmath ctype curl fileinfo gd imagick \
+                    json ldap mbstring memcached mysqli mysqlnd pgsql session \
+                    soap xml zip)
+                ;;
+        esac
 
         for phpExtension in "${phpExtensions[@]}"; do
             if "$PHP_BIN" -m | grep "$phpExtension" > /dev/null; then
@@ -523,6 +557,9 @@ function configureOS {
             ;;
         "rhel7")
             configureRHEL7
+            ;;
+        "rhel8")
+            configureRHEL8
             ;;
         "centos7")
             configureCentOS7
@@ -791,13 +828,46 @@ EOF
     yum --assumeyes --quiet install moreutils || \
         abort "Unable to install packages"
 
-    unitctl "enable" "$APACHE_UNIT"
-    unitctl "enable" "$MARIADB_UNIT"
-    unitctl "enable" "$MEMCACHED_UNIT"
+    for unit in $APACHE_UNIT $MARIADB_UNIT $MEMCACHED_UNIT; do
+        unitctl "enable" "$unit"
+        unitctl "start" "$unit"
+    done
 
-    unitctl "start" "$APACHE_UNIT"
-    unitctl "start" "$MARIADB_UNIT"
-    unitctl "start" "$MEMCACHED_UNIT"
+    log "Allow incoming HTTP traffic"
+    systemctl -q is-active firewalld.service || (
+        log "Firewall is inactive."
+        unitctl "start" "firewalld"
+    )
+    firewall-cmd --permanent --add-service=http || abort "Unable to configure firewall"
+    unitctl "restart" "firewalld"
+}
+
+function configureRHEL8 {
+    log "Keep your yum packages up-to-date"
+    yum --assumeyes --quiet update || abort "Unable to update yum packages"
+    yum --assumeyes --quiet autoremove || abort "Unable to remove out-dated yum packages"
+    yum --assumeyes --quiet clean all || abort "Unable to clean yum caches"
+    rm -rf /var/cache/yum || abort "Unable to remove orphaned yum caches"
+
+    for appStream in httpd:2.4 mariadb:10.3 php:7.2; do
+        log "Install AppStream $appStream"
+        yum --assumeyes --quiet module install "$appStream"
+    done
+
+    log "Install some important packages"
+    ## TODO php-imagick is missing!
+    ## TODO php-memcached has missing dependency!
+    ## TODO moreutils is missing (needed for chronic)!
+    yum --assumeyes --quiet install \
+        memcached unzip wget zip \
+        php-bcmath php-gd  php-ldap php-mysqli php-mysqlnd \
+        php-pgsql php-soap php-zip || \
+        abort "Unable to install packages"
+
+    for unit in $APACHE_UNIT $MARIADB_UNIT $MEMCACHED_UNIT; do
+        unitctl "enable" "$unit"
+        unitctl "start" "$unit"
+    done
 
     log "Allow incoming HTTP traffic"
     systemctl -q is-active firewalld.service || (
@@ -1100,10 +1170,11 @@ function configurePHPFPM {
         "debian9"|"debian10"|"ubuntu1604"|"ubuntu1804")
             unitctl "restart" "$PHP_FPM_UNIT"
             ;;
-        "rhel7"|"centos7")
+        "rhel7"|"rhel8"|"centos7")
             log "Disable default configuration file"
             mv /etc/php-fpm.d/www.conf{,.bak} || \
                 abort "Unable to disable default configuration file"
+            log "Put new settings into file '/etc/php-fpm.d/i-doit.conf'"
             cat << EOF > /etc/php-fpm.d/i-doit.conf || \
                 abort "Unable to create and edit file '/etc/php-fpm.d/i-doit.conf'"
 [i-doit]
@@ -1119,12 +1190,13 @@ pm.min_spare_servers = 5
 pm.max_spare_servers = 35
 security.limit_extensions = .php
 EOF
-            unitctl "start" "$PHP_FPM_UNIT"
+            unitctl "restart" "$PHP_FPM_UNIT"
             ;;
         "sles12sp2"|"sles12sp3"|"sles12sp4"|"sles15")
             log "Enable PHP FPM configuration files"
             mv /etc/php7/fpm/php-fpm.conf{.default,} || \
                 abort "Unable to move file"
+            log "Put new settings into file '/etc/php7/fpm/php-fpm.d/i-doit.conf'"
             cat << EOF > /etc/php7/fpm/php-fpm.d/i-doit.conf || \
                 abort "Unable to create and edit file '/etc/php7/fpm/php-fpm.d/i-doit.conf'"
 [i-doit]
@@ -1161,7 +1233,7 @@ function configureApache {
     hostname="$(cat /etc/hostname)"
 
     case "$OS" in
-        "rhel7"|"centos7")
+        "rhel7"|"rhel8"|"centos7")
             cat << EOF > ${APACHE_CONFIG_FILE} || \
                 abort "Unable to create and edit file '${APACHE_CONFIG_FILE}'"
 DirectoryIndex index.php
@@ -1196,12 +1268,17 @@ EOF
                 abort "Unable to give read permissions recursively"
             chcon -t httpd_sys_rw_content_t "${INSTALL_DIR}/" -R || \
                 abort "Unable to give write permissions recursively"
-            log "Disable MPM prefork"
-            sed -i "/.* mpm_prefork_module /s/^#*/#/" /etc/httpd/conf.modules.d/00-mpm.conf || \
-                abort "sed exited with error"
-            log "Enable MPM event"
-            sed -i "/^#.* mpm_event_module /s/^#//" /etc/httpd/conf.modules.d/00-mpm.conf || \
-                abort "sed exited with error"
+
+            ## mpm_event is already enabled on RHEL 8:
+            if [[ "$OS" != "rhel8" ]]; then
+                log "Disable MPM prefork"
+                sed -i "/.* mpm_prefork_module /s/^#*/#/" /etc/httpd/conf.modules.d/00-mpm.conf || \
+                    abort "sed exited with error"
+                log "Enable MPM event"
+                sed -i "/^#.* mpm_event_module /s/^#//" /etc/httpd/conf.modules.d/00-mpm.conf || \
+                    abort "sed exited with error"
+            fi
+
             unitctl "restart" "$APACHE_UNIT"
             ;;
         "sles12sp2"|"sles12sp3"|"sles12sp4"|"sles15")
